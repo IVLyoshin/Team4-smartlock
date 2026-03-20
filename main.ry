@@ -1,0 +1,327 @@
+# Электронный замок с PIN-кодом, сервоприводом и журналом событий
+
+
+from machine import Pin, PWM, SoftI2C, Timer
+import ssd1306
+import time
+import json
+
+
+ROW_PINS = [13, 12, 14, 27]  # R1, R2, R3, R4
+COL_PINS = [26, 25, 33, 32]  # C1, C2, C3, C4
+
+
+SERVO_PIN = 15
+LED_GREEN_PIN = 2
+LED_RED_PIN = 5
+BUTTON_PIN = 4  # Кнопка service/reset
+I2C_SCL_PIN = 22
+I2C_SDA_PIN = 21
+
+# Настройки замка
+CORRECT_PIN = "1234"          # PIN-код по умолчанию
+MAX_ATTEMPTS = 3               # Максимальное число попыток
+LOCKOUT_TIME = 30              # Время блокировки в секундах
+SERVO_OPEN_ANGLE = 90          # Угол для открытого замка
+SERVO_CLOSED_ANGLE = 0         # Угол для закрытого замка
+MAX_PIN_LENGTH = 4              # Максимальная длина PIN-кода
+
+
+i2c = SoftI2C(scl=Pin(I2C_SCL_PIN), sda=Pin(I2C_SDA_PIN))
+oled = ssd1306.SSD1306_I2C(128, 64, i2c)
+
+
+servo = PWM(Pin(SERVO_PIN), freq=50)
+
+led_green = Pin(LED_GREEN_PIN, Pin.OUT)
+led_red = Pin(LED_RED_PIN, Pin.OUT)
+led_green.off()
+led_red.off()
+
+
+button = Pin(BUTTON_PIN, Pin.IN, Pin.PULL_UP)
+
+
+row_pins = [Pin(pin, Pin.OUT) for pin in ROW_PINS]
+col_pins = [Pin(pin, Pin.IN, Pin.PULL_DOWN) for pin in COL_PINS]
+
+
+current_pin = ""                # Текущий вводимый PIN
+attempts = 0                     # Счетчик неудачных попыток
+locked_until = 0                  # Время разблокировки (таймстамп)
+door_open = False                 # Состояние двери
+admin_mode = False                # Режим администратора
+journal = []                       # Журнал событий
+MAX_JOURNAL_SIZE = 20              # Максимальное количество записей в журнале
+
+def set_servo_angle(angle):
+    """Установка угла сервопривода (0-180)"""
+    duty = int(40 + (angle / 180) * 115) 
+    servo.duty(duty)
+
+def log_event(event):
+    """Добавление события в журнал"""
+    global journal
+    timestamp = time.localtime()
+    time_str = "{:02d}:{:02d}:{:02d}".format(timestamp[3], timestamp[4], timestamp[5])
+    journal.append(f"[{time_str}] {event}")
+    if len(journal) > MAX_JOURNAL_SIZE:
+        journal.pop(0)
+
+def update_display():
+    """Обновление информации на OLED-дисплее"""
+    oled.fill(0)
+    oled.text("SMART LOCK v1.0", 0, 0, 1)
+    
+    # Проверка блокировки
+    if time.time() < locked_until:
+        remaining = locked_until - time.time()
+        oled.text(f"LOCKED {}s", 0, 10, 1)
+        oled.text("Wait...", 0, 20, 1)
+    else:
+        # Отображение состояния двери
+        if door_open:
+            oled.text("DOOR: OPEN", 0, 10, 1)
+        else:
+            oled.text("DOOR: CLOSED", 0, 10, 1)
+        
+        # Отображение текущего PIN
+        pin_display = current_pin + "_" * (MAX_PIN_LENGTH - len(current_pin))
+        oled.text(f"PIN: {pin_display}", 0, 25, 1)
+        
+        # Отображение попыток
+        oled.text(f"Attempts: {attempts}/{MAX_ATTEMPTS}", 0, 40, 1)
+    
+    # Режим администратора
+    if admin_mode:
+        oled.text("ADMIN MODE", 0, 55, 1)
+    
+    oled.show()
+
+def read_keypad():
+    """Чтение клавиатуры 4x4 с защитой от дребезга"""
+    keypad_map = [
+        ['1', '2', '3', 'A'],
+        ['4', '5', '6', 'B'],
+        ['7', '8', '9', 'C'],
+        ['*', '0', '#', 'D']
+    ]
+    
+    for r, row_pin in enumerate(row_pins):
+        row_pin.value(1)
+        for c, col_pin in enumerate(col_pins):
+            if col_pin.value() == 1:
+                row_pin.value(0)
+                time.sleep_ms(50)  # Антидребезг
+                return keypad_map[r][c]
+        row_pin.value(0)
+    return None
+
+def handle_key(key):
+    """Обработка нажатой клавиши"""
+    global current_pin, attempts, locked_until, door_open, admin_mode, journal, CORRECT_PIN
+    
+    # Если заблокировано, игнорируем ввод
+    if time.time() < locked_until:
+        return
+    
+    # Обработка клавиш
+    if key == '*':  # Стереть последний символ
+        if len(current_pin) > 0:
+            current_pin = current_pin[:-1]
+            log_event("Backspace pressed")
+    
+    elif key == '#':  # Подтвердить ввод
+        if len(current_pin) > 0:
+            check_pin()
+    
+    elif key == 'A':  # Вход в режим администратора
+        if not admin_mode and len(current_pin) == 4:
+            if current_pin == CORRECT_PIN:  # Требуется текущий PIN
+                admin_mode = True
+                current_pin = ""
+                log_event("Admin mode activated")
+                oled.fill(0)
+                oled.text("ADMIN MODE", 0, 20, 1)
+                oled.text("Enter new PIN", 0, 35, 1)
+                oled.show()
+                time.sleep(1)
+    
+    elif key == 'B':  # Выход из режима администратора
+        if admin_mode:
+            admin_mode = False
+            current_pin = ""
+            log_event("Admin mode deactivated")
+    
+    elif key == 'C':  # Показать журнал
+        show_journal()
+    
+    elif key == 'D':  # Сброс блокировки (только для админа)
+        if admin_mode:
+            locked_until = 0
+            attempts = 0
+            log_event("Lockout reset by admin")
+            admin_mode = False
+    
+    else:  # Цифровые клавиши
+        if len(current_pin) < MAX_PIN_LENGTH:
+            current_pin += key
+            log_event(f"Key pressed: {key}")
+
+def check_pin():
+    """Проверка введенного PIN-кода"""
+    global current_pin, attempts, locked_until, door_open, admin_mode, CORRECT_PIN
+    
+    if admin_mode:
+        # Смена PIN-кода в режиме администратора
+        if len(current_pin) == 4:
+            CORRECT_PIN = current_pin
+            admin_mode = False
+            log_event(f"PIN changed to {CORRECT_PIN}")
+            oled.fill(0)
+            oled.text("PIN CHANGED!", 0, 30, 1)
+            oled.show()
+            time.sleep(1)
+        current_pin = ""
+        return
+    
+    # Проверка PIN-кода
+    if current_pin == CORRECT_PIN:
+        # Правильный PIN
+        door_open = not door_open  # Переключение состояния двери
+        set_servo_angle(SERVO_OPEN_ANGLE if door_open else SERVO_CLOSED_ANGLE)
+        attempts = 0
+        led_green.value(1)
+        led_red.value(0)
+        log_event(f"Door {'opened' if door_open else 'closed'} - PIN correct")
+        
+        # Визуальный сигнал
+        oled.fill(0)
+        oled.text("ACCESS GRANTED", 10, 30, 1)
+        oled.show()
+        time.sleep(1)
+        led_green.value(0)
+    else:
+        # Неправильный PIN
+        attempts += 1
+        led_red.value(1)
+        log_event(f"Wrong PIN attempt #{attempts}")
+        
+        # Визуальный сигнал
+        oled.fill(0)
+        oled.text("ACCESS DENIED", 10, 20, 1)
+        oled.text(f"Attempt {attempts}/{MAX_ATTEMPTS}", 10, 35, 1)
+        oled.show()
+        time.sleep(1)
+        led_red.value(0)
+        
+        # Блокировка при превышении лимита попыток
+        if attempts >= MAX_ATTEMPTS:
+            locked_until = time.time() + LOCKOUT_TIME
+            log_event(f"Device locked for {LOCKOUT_TIME}s")
+            oled.fill(0)
+            oled.text("DEVICE LOCKED", 10, 20, 1)
+            oled.text(f"Wait {LOCKOUT_TIME}s", 10, 35, 1)
+            oled.show()
+    
+    current_pin = ""
+
+def show_journal():
+    """Отображение журнала событий на OLED"""
+    oled.fill(0)
+    oled.text("EVENT JOURNAL", 0, 0, 1)
+    
+    if not journal:
+        oled.text("No events", 20, 30, 1)
+        oled.show()
+        time.sleep(2)
+        return
+    
+    # Показываем последние 4 события
+    start = max(0, len(journal) - 4)
+    for i, event in enumerate(journal[start:]):
+        if i < 4:
+            # Обрезаем длинные строки
+            display_text = event if len(event) <= 16 else event[:14] + ".."
+            oled.text(display_text, 0, 10 + (i+1)*12, 1)
+    
+    oled.text("Press any key", 0, 55, 1)
+    oled.show()
+    
+    # Ждем нажатия любой клавиши для выхода
+    timeout = time.time() + 5
+    while time.time() < timeout:
+        if read_keypad():
+            break
+        time.sleep(0.1)
+
+def check_service_button():
+    """Проверка нажатия сервисной кнопки"""
+    if button.value() == 0:  # Кнопка нажата (pull-up, 0 при нажатии)
+        time.sleep_ms(50)  # Антидребезг
+        if button.value() == 0:
+            global attempts, locked_until
+            attempts = 0
+            locked_until = 0
+            log_event("Service button pressed - reset")
+            
+            # Мигаем светодиодами
+            for _ in range(3):
+                led_green.value(1)
+                led_red.value(1)
+                time.sleep(0.2)
+                led_green.value(0)
+                led_red.value(0)
+                time.sleep(0.2)
+            
+            while button.value() == 0:
+                time.sleep(0.1)
+
+
+def main():
+    global current_pin, attempts, locked_until, door_open
+    
+    # Инициализация
+    print("Smart Lock System starting...")
+    set_servo_angle(SERVO_CLOSED_ANGLE)
+    log_event("System started")
+    
+    # Приветственный экран
+    oled.fill(0)
+    oled.text("Smart Lock v1.0", 10, 20, 1)
+    oled.text("Enter PIN:", 10, 35, 1)
+    oled.show()
+    time.sleep(1)
+    
+    last_key_time = 0
+    last_key = None
+    
+    # Главный цикл
+    while True:
+        # Проверка сервисной кнопки
+        check_service_button()
+        
+        # Чтение клавиатуры
+        key = read_keypad()
+        
+        if key:
+            # Защита от повторного считывания той же клавиши
+            current_time = time.ticks_ms()
+            if key != last_key or (current_time - last_key_time) > 300:
+                handle_key(key)
+                last_key = key
+                last_key_time = current_time
+        
+        # Обновление дисплея
+        update_display()
+        
+        # Короткая задержка
+        time.sleep(0.05)
+
+# Запуск программы
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Program stopped")
+        servo.deinit()
