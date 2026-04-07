@@ -1,0 +1,82 @@
+[
+  {
+    "name": "priority:must",
+    "color": "FF0000",
+    "description": "MUST - обязательно для MVP"
+  },
+  {
+    "name": "priority:should",
+    "color": "FFA500",
+    "description": "SHOULD - важно, но можно отложить"
+  },
+  {
+    "name": "priority:could",
+    "color": "00FF00",
+    "description": "COULD - дополнительная функциональность"
+  },
+  {
+    "name": "priority:won't",
+    "color": "808080",
+    "description": "WON'T - не делаем сейчас"
+  },
+  {
+    "name": "type:user-story",
+    "color": "1D76DB",
+    "description": "User Story - пользовательская история"
+  },
+  {
+    "name": "type:technical-task",
+    "color": "0E8A16",
+    "description": "Technical Task - техническая задача"
+  },
+  {
+    "name": "type:bug",
+    "color": "D73A4A",
+    "description": "Bug - ошибка"
+  },
+  {
+    "name": "type:spike",
+    "color": "F9D0C4",
+    "description": "Spike - исследование"
+  },
+  {
+    "name": "type:epic",
+    "color": "B60205",
+    "description": "Epic - крупный блок задач"
+  },
+  {
+    "name": "size:small",
+    "color": "C2E0C6",
+    "description": "Small - 1-2 Story Points"
+  },
+  {
+    "name": "size:medium",
+    "color": "FBCA04",
+    "description": "Medium - 3-5 Story Points"
+  },
+  {
+    "name": "size:large",
+    "color": "D93F0B",
+    "description": "Large - 6-8 Story Points"
+  },
+  {
+    "name": "size:x-large",
+    "color": "B60205",
+    "description": "X-Large - 9+ Story Points"
+  },
+  {
+    "name": "status:blocked",
+    "color": "E99695",
+    "description": "Blocked - задача заблокирована"
+  },
+  {
+    "name": "status:review-needed",
+    "color": "FBCA04",
+    "description": "Review Needed - нужна проверка"
+  },
+  {
+    "name": "status:in-progress",
+    "color": "5319E7",
+    "description": "In Progress - в процессе"
+  }
+]
